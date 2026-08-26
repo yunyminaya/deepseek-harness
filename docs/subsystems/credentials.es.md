@@ -1,0 +1,288 @@
+# Credenciales de usuario
+
+[English](credentials.md) | Español
+
+El seam de credenciales de [dsh-credentials](../../packages/credentials/credentials) mantiene los secretos fuera de la configuración: las secciones de ajustes y las entradas de `cordis.yml` llevan *referencias* (nombres de variables de entorno), los providers como [dsh-credentials-local](../../packages/credentials/credentials-local) custodian los valores, y los consumidores resuelven una referencia una vez por operación — los adaptadores LLM resuelven una vez por solicitud de modelo, así que una credencial rotada llega a la siguiente solicitud sin ningún reinicio. Una regla de todo el seam vincula a todos los providers: un valor almacenado vacío está ausente en todas partes.
+
+Fuente: [`packages/credentials/credentials/src/index.ts`](../../packages/credentials/credentials/src/index.ts)
+
+## Identidad
+
+Una referencia nombra una credencial como nombre de variable de entorno estilo POSIX. La marca evita que los llamadores mezclen referencias de credenciales con otras cadenas pasadas entre paquetes o procesos; la construcción valida la sintaxis de identificador de shell.
+
+```ts type-equiv
+/** Nominal reference to one credential: a POSIX-style environment-variable name. */
+type CredentialRef = Branded<'CredentialRef'>
+```
+
+## Resolución
+
+`resolve(ref)` devuelve el valor junto con la capa de origen definida por el provider que lo suministró, o `undefined` mientras no esté configurado. Los consumidores vuelven a resolver en cada operación y nunca guardan en caché entre operaciones — esa lectura por operación es el mecanismo de actualización en caliente.
+
+```ts type-equiv
+/** One resolved credential value and the source layer that supplied it. */
+interface ResolvedCredential {
+  /** The non-empty secret value. */
+  value: string
+  /** Provider-defined source layer id (the local provider uses `env`, `file`, `project-env`, and `user-env`). */
+  source: string
+}
+```
+
+## Descripción
+
+`describe(ref)` responde a las superficies de configuración sin exponer jamás un valor: si la referencia resuelve, desde qué capa y si `set` tendría éxito en este momento. El provider local informa de una referencia suministrada por el entorno del proceso en vivo como `writable: false` — una escritura parecería tener éxito mientras la resolución siguiera devolviendo el valor que la sombrea, así que el seam la rechaza y la interfaz puede mostrar la referencia como de solo lectura de antemano.
+
+```ts type-equiv
+/** Source and writability facts for one reference, safe for configuration UIs — never the value. */
+interface CredentialInfo {
+  /** Whether {@link CredentialProvider.resolve} would currently return a value. */
+  configured: boolean
+  /** Source layer currently supplying the value; absent while unconfigured. */
+  source?: string
+  /** Whether {@link CredentialProvider.set} would currently succeed for this reference. */
+  writable: boolean
+}
+```
+
+## Cambios confirmados
+
+`credentials/reference-updated (ref)` se dispara tras un cambio confirmado en un origen gestionado por el provider — un `set`, un `unset` o una edición externa observada en el almacenamiento. Los cambios ambientales del entorno del proceso no son observables y nunca emiten. Los consumidores no necesitan el evento (vuelven a resolver por operación); existe para que las superficies de configuración actualicen una insignia «configured».
+
+<!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
+
+<a id="cordis-surface"></a>
+
+## Cordis API
+
+Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.es.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
+
+<a id="ctxauthorization--authorizationservice"></a>
+
+### `ctx.authorization` — `AuthorizationService`
+
+`ctx.authorization`: a registry of credential-obtaining flows, one attempt at a time per key.
+
+```ts cordis-catalog
+/**
+ * Offer a way to obtain one credential. One flow per key: two plugins
+ * claiming the same key would each write a record in their own format, and
+ * whichever ran last would leave the other reading a payload it cannot parse.
+ *
+ * @param flow - the key it writes, its label, its methods, and its runner.
+ * @returns Disposer that withdraws this flow.
+ * @throws {AuthorizationError} code `DUPLICATE_FLOW` when the key is already claimed.
+ */
+registerFlow(flow: AuthorizationFlow): () => void
+
+/**
+ * Every registered flow, for a surface listing what can be authorized.
+ * @returns one entry per flow, in registration order.
+ */
+list(): readonly AuthorizationEntry[]
+
+/**
+ * One registered flow.
+ * @param key - the credential record to ask about.
+ * @returns the entry, or undefined when no flow claims that key.
+ */
+describe(key: CredentialKey): AuthorizationEntry | undefined
+
+/**
+ * Withdraw the attempt running for a key, if any. Separate from the
+ * request's own signal because a request/response transport answers a Cancel
+ * button on a second call, with no handle on the first one's signal.
+ * @param key - the credential record whose attempt should stop.
+ */
+cancel(key: CredentialKey): void
+
+/**
+ * Run one attempt to authorize a key, and report how it ended.
+ *
+ * One attempt per key at a time. A second caller is refused rather than
+ * joined: the two would be prompting different humans through the same flow,
+ * and the second would answer questions the first was asked.
+ *
+ * @param request - the key, the method, the surface, and the cancel signal.
+ * @returns `authorized` once the flow's record is committed during this
+ *   attempt and observed, or `cancelled` when the human declined or the
+ *   caller withdrew.
+ * @throws {AuthorizationError} code `NO_FLOW` when nothing claims the key,
+ *   `UNKNOWN_METHOD` when the named method is not one the flow offers,
+ *   `ALREADY_IN_FLIGHT` when an attempt is already running for the key, or
+ *   `NOT_COMMITTED` when the flow resolved without committing a record
+ *   during the attempt.
+ */
+async begin(request: AuthorizationRequest): Promise<AuthorizationOutcome>
+```
+
+Source: [`packages/credentials/authorization/src/index.ts`](../../packages/credentials/authorization/src/index.ts)
+
+<a id="ctxcredentials--credentialprovider-abstract-seam"></a>
+
+### `ctx.credentials` — `CredentialProvider` (abstract seam)
+
+Abstract credential service over two key spaces that answer two questions.
+
+A CredentialRef answers "what is behind this environment-variable name", layered over the process environment, the provider-managed store, and `.env` files. One seam-wide rule binds that half: an empty stored value is absent everywhere — `resolve` skips it, `describe` reports it unconfigured — so a blank never masquerades as a configured secret.
+
+A CredentialKey answers "what credential does this plugin hold for this id". Nothing can layer here — an authorization grant has no environment to be read from — so presence of the record is the whole fact, and modifyRecord is the only write path because a correct write depends on the current value (a token refresh is read-decide-replace under one lock).
+
+```ts cordis-catalog
+/**
+ * Resolve one reference to its current value. Resolution is per call:
+ * consumers re-resolve at each operation and must not cache across
+ * operations — that per-operation read is what makes a changed credential
+ * reach the next operation without a restart.
+ * @param ref - the reference to resolve.
+ * @returns the value and its source, or `undefined` while unconfigured.
+ */
+abstract resolve(ref: CredentialRef): Promise<ResolvedCredential | undefined>
+
+/**
+ * Describe one reference for configuration surfaces without exposing the
+ * value.
+ * @param ref - the reference to describe.
+ * @returns configured state, supplying source, and writability.
+ */
+abstract describe(ref: CredentialRef): Promise<CredentialInfo>
+
+/**
+ * Durably store one value in the provider-managed writable source. Rejects
+ * while a read-only source shadows the reference — the write would appear
+ * to succeed while resolution keeps returning the shadowing value — and
+ * rejects an empty value (use {@link unset}).
+ * @param ref - the reference to store.
+ * @param value - the non-empty secret value.
+ */
+abstract set(ref: CredentialRef, value: string): Promise<void>
+
+/**
+ * Remove one reference from the provider-managed writable source; removing
+ * an absent reference is a no-op. Rejects while a read-only source shadows
+ * the reference, like {@link set}.
+ * @param ref - the reference to remove.
+ */
+abstract unset(ref: CredentialRef): Promise<void>
+
+/**
+ * Read one stored record. The value is returned as its owner wrote it; a
+ * {@link GrantRecord} payload is not interpreted on the way out.
+ * @param key - the record to read.
+ * @returns the record, or `undefined` while none is stored.
+ */
+abstract readRecord(key: CredentialKey): Promise<CredentialRecord | undefined>
+
+/**
+ * Describe one record for configuration surfaces without exposing its value.
+ * @param key - the record to describe.
+ * @returns presence, discriminant, and writability.
+ */
+abstract describeRecord(key: CredentialKey): Promise<CredentialRecordInfo>
+
+/**
+ * Enumerate every stored record's address and tag. Unlike the reference
+ * half, which has no enumeration because configuration surfaces learn which
+ * references exist from settings schemas, records have no such discovery
+ * path: a surface that cannot list them cannot show what a user is
+ * authorized for, nor find an orphan left by an uninstalled plugin.
+ * @returns every stored record, values excluded.
+ */
+abstract listRecords(): Promise<readonly CredentialRecordEntry[]>
+
+/**
+ * Serialized read-modify-write over one record — the only write path.
+ * `mutate` sees the record as it stands at the moment the write is
+ * exclusive, and returning `undefined` leaves the entry untouched. Exclusion
+ * holds across processes where the backing store supports it, which is what
+ * makes a token refresh safe: two processes rotating one refresh token
+ * concurrently would otherwise lose whichever wrote first.
+ * @param key - the record to modify.
+ * @param mutate - receives the current record and returns its replacement, or `undefined` to leave it.
+ * @returns the record after the write, or the current one when `mutate` declined.
+ */
+abstract modifyRecord( key: CredentialKey, mutate: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>, ): Promise<CredentialRecord | undefined>
+
+/**
+ * Remove one record; removing an absent record is a no-op.
+ * @param key - the record to remove.
+ */
+abstract deleteRecord(key: CredentialKey): Promise<void>
+```
+
+Source: [`packages/credentials/credentials/src/index.ts`](../../packages/credentials/credentials/src/index.ts)
+
+<a id="authorization-events"></a>
+
+### `authorization/*` events
+
+<a id="authorizationsettled--emit"></a>
+
+#### `authorization/settled` — emit
+
+One authorization attempt has finished and released its key. Fires for every terminal outcome, failures included, so a surface watching a key it did not start (a second browser tab) learns the attempt is over.
+
+```ts cordis-catalog
+/**
+ * One authorization attempt has finished and released its key. Fires for
+ * every terminal outcome, failures included, so a surface watching a key it
+ * did not start (a second browser tab) learns the attempt is over.
+ * @mode emit
+ * @param key - the credential record the finished attempt was authorizing.
+ * @param settlement - how it ended, including the `failed` case its caller sees as a thrown error.
+ */
+'authorization/settled'(key: CredentialKey, settlement: AuthorizationSettlement): void
+```
+
+Source: [`packages/credentials/authorization/src/index.ts`](../../packages/credentials/authorization/src/index.ts)
+
+<a id="credentials-events"></a>
+
+### `credentials/*` events
+
+<a id="credentialsrecord-updated--emit"></a>
+
+#### `credentials/record-updated` — emit
+
+Committed change to a stored credential record: a `modifyRecord` that wrote, a `deleteRecord` that removed, or an external edit observed in storage. Separate from `credentials/reference-updated` because the two key grammars are disjoint — a listener that received both on one event could not tell which space a subject belongs to. Listener failures are contained on the same terms as `credentials/reference-updated`.
+
+```ts cordis-catalog
+/**
+ * Committed change to a stored credential record: a `modifyRecord` that
+ * wrote, a `deleteRecord` that removed, or an external edit observed in
+ * storage. Separate from `credentials/reference-updated` because the two key
+ * grammars are disjoint — a listener that received both on one event could
+ * not tell which space a subject belongs to. Listener failures are
+ * contained on the same terms as `credentials/reference-updated`.
+ * @param key - the record whose stored value changed.
+ * @mode emit
+ */
+'credentials/record-updated'(key: CredentialKey): void
+```
+
+Source: [`packages/credentials/credentials/src/types.ts`](../../packages/credentials/credentials/src/types.ts)
+
+<a id="credentialsreference-updated--emit"></a>
+
+#### `credentials/reference-updated` — emit
+
+Committed change to a provider-managed credential source: a `set`, an `unset`, or an external edit observed in storage. Ambient process-environment changes are not observable and never emit. Listener failures are contained and logged — a sync throw and an async rejection alike — without changing the committed operation's outcome, except `INVARIANT`-coded failures, which rethrow after every listener ran; that rethrow reaches the emitter only from synchronous listeners, so invariant checks on this event must not be async functions.
+
+```ts cordis-catalog
+/**
+ * Committed change to a provider-managed credential source: a `set`, an
+ * `unset`, or an external edit observed in storage. Ambient
+ * process-environment changes are not observable and never emit. Listener
+ * failures are contained and logged — a sync throw and an async rejection
+ * alike — without changing the committed operation's outcome, except
+ * `INVARIANT`-coded failures, which rethrow after every listener ran;
+ * that rethrow reaches the emitter only from synchronous listeners, so
+ * invariant checks on this event must not be async functions.
+ * @param ref - the reference whose stored value changed.
+ * @mode emit
+ */
+'credentials/reference-updated'(ref: CredentialRef): void
+```
+
+Source: [`packages/credentials/credentials/src/types.ts`](../../packages/credentials/credentials/src/types.ts)
+<!-- END GENERATED cordis-surface -->

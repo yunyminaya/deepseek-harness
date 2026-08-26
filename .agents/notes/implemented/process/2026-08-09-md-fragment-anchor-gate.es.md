@@ -1,0 +1,32 @@
+# Agent Note: verify-md-links valida los anclas de fragmento y cierra la última clase de enlace roto
+
+Status: implemented
+
+[English](2026-08-09-md-fragment-anchor-gate.md) | [中文](2026-08-09-md-fragment-anchor-gate.zh.md) | Español
+
+## Problema
+
+`verify-md-links` demostraba que el archivo destino de un enlace relativo existe pero nunca miraba el `#fragment`, y el estándar de documentación lo compensaba con una regla manual: comprueba los anclas con grep antes de renombrar un encabezado. Un barrido del corpus encontró 15 enlaces cuyos fragmentos no nombraban ningún ancla en su destino — tres modos distintos de deterioro: un encabezado reformulado después de escribir el enlace (`#security-and-authority-are-explicit-non-goals` frente al «Security and authority are non-goals» actual de la nota), un contrato reubicado a otro documento propietario (`tool-fs` enlazando el README del seam para la regla de no-timeout que ahora vive en el README del grupo), y lados de pares zh que enlazan slugs ingleses que sus encabezados chinos nunca producen (`#deferred-work` contra `## 推迟工作`). Ninguno de estos falla ninguna puerta, y cada uno deja silenciosamente al lector varado en la parte superior de la página destino.
+
+## Decisión
+
+`verify-md-links` ahora resuelve también los fragmentos (superando el recorte de alcance diferido de la [decisión de enlaces cruzados](2026-06-18-markdown-cross-link-lint.es.md)). Para cada enlace relativo cuyo destino es un archivo Markdown — incluidos los enlaces `#anchor` dentro del mismo archivo, que el verificador antiguo omitía por completo — el fragmento debe nombrar un ancla real en el destino: el slug de GitHub de un encabezado o un `<a id>` explícito en flujo HTML real (los ejemplos de código y los anclas comentados no registran nada). Los slugs se calculan del TEXTO RENDERIZADO del encabezado mediante el `markdownHeadingLines` propio del repositorio, de modo que los enlaces, el código en línea y el énfasis dentro de un encabezado generan el slug como los renderiza GitHub; los guiones bajos sobreviven (`#showcase-web_fetch`); los slugs repetidos reciben los sufijos `-1`, `-2`, … del conjunto ocupado de GitHub; la coincidencia es sensible a mayúsculas, porque los ids de elemento lo son. Los fragmentos sobre destinos que no son Markdown (`file.ts#L10`) llevan semántica propiedad del renderizador y quedan fuera de alcance, igual que las URLs externas y las absolutas de raíz. Los conjuntos de anclas se recogen perezosamente para cualquier destino existente (`anchorCache`), de modo que los enlaces HACIA notas archivadas y documentos vendored se validan sin convertir esos archivos en fuentes.
+
+La función de slug difiere del slugger de anclas de región de `gen-cordis-catalog` (que elimina los guiones bajos): los encabezados del generador siempre son alcanzables a través de sus anclas `<a id>` explícitas, así que los dos no necesitan compartir una regla. Los lados de pares chinos siguen la convención existente del repositorio (`docs/glossary.zh.md`, `docs/cordis-primer.zh.md`): conserva el fragmento inglés en el enlace y coloca un `<a id>` explícito antes del encabezado chino, de modo que ambos lados de idioma exponen anclas idénticas.
+
+Los 15 fragmentos rotos se corrigen en el mismo cambio: slugs obsoletos reorientados a los encabezados actuales, el contrato de no-timeout reubicado ahora enlazado en su README de grupo propietario, y cuatro documentos zh provistos de anclas explícitas. `docs/AGENTS.md` y el skill `dsh-doc-standards` ya no prescriben el grep manual de anclas para enlaces Markdown; sobrevive solo para anclas citadas desde cadenas TypeScript cuya salida nunca llega a Markdown escaneado por las puertas (los tres de hoy se renderizan todos en páginas escaneadas, así que la puerta los cubre a través de la salida confirmada).
+
+## Verificación
+
+`scripts/verify-md-links.spec.ts` demuestra las rutas de aceptación: slugging de texto renderizado (backticks, puntuación, un encabezado enlazado, guiones bajos conservados), sufijos repetidos del conjunto ocupado, `<a id>` ignorados dentro de fences/código en línea/comentarios, un documento de enlaces mixtos que resuelve, fragmentos muertos dentro del mismo archivo y entre archivos, un fragmento con variante de mayúsculas, y un destino ausente que sigue notificándose como `target` y no como `anchor`. La puerta se ejecuta sobre el corpus completo en doc-sync (`verify-md-links`) y pasa solo después de los 15 arreglos — el propio corpus es la evidencia de rojo a verde para cada modo de deterioro.
+
+## Alternativas consideradas
+
+- **Mantener la regla del grep manual.** Demostrablemente no se sostuvo: los 15 fragmentos se deterioraron bajo una cultura de mantenimiento guiada por puertas, porque las reescrituras de encabezados ocurren en PRs que nunca miran los enlaces entrantes. Un invariante mecánico pertenece a una puerta ejecutada.
+- **Apuntar los enlaces zh a anclas con slug chino.** GitHub genera slugs de CJK sin problema, pero la convención del corpus ya es explícita `<a id>` + fragmentos en inglés (glosario, primer), que además sobrevive a renderizadores que eliminan lo no ASCII; adoptar una segunda convención habría dividido el corpus.
+- **Compartir `githubSlug` con el generador typert.** Una importación de una función acoplaría una puerta de docs a la compilación de un paquete, y las dos reglas difieren de verdad (el generador elimina los guiones bajos; sus anclas son `<a id>` explícitas que la puerta lee directamente), así que la divergencia es por diseño, no deriva.
+- **Validar también los slugs de VitePress.** La comprobación de enlaces rotos del sitio publicado ya se ejecuta en `website:build`; las regiones generadas llevan anclas explícitas precisamente para que los dos renderizadores coincidan, y los encabezados a mano que divergieran fallarían allí.
+
+## Consecuencias
+
+Renombrar un encabezado ahora rompe la compilación en cualquier lugar donde un enlace Markdown cite su ancla, en lugar de dejar varados a los lectores; los autores corrigen los enlaces entrantes en el mismo cambio, exactamente como ya deben hacerlo con los renombres de archivo. Los anclas dentro del mismo archivo ya no son un punto ciego, así que las páginas zh deben anclar cualquier fragmento inglés que usen. El grep manual previo al renombrado sobrevive solo para anclas citadas desde cadenas TypeScript cuya salida nunca llega a Markdown escaneado por las puertas.

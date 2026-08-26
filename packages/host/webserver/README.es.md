@@ -1,0 +1,22 @@
+# @deepseek-ai/dsh-host-webserver
+
+[English](README.md) | Español
+
+Plugin de registro de rutas HTTP y de upgrade para web (`WebServer` como export por defecto, config `{host, port}`): un servidor `node:http` que escucha al activarse y proporciona `ctx.webServer`. `register(route)` añade una ruta HTTP con nombre `exact`/`prefix`; `registerUpgrade(route)` añade una ruta de upgrade para un pathname exacto. Una ruta duplicada dentro de cualquiera de las dos tablas lanza una excepción porque los patrones de ruta son un contrato a nivel de composición y una colisión es una mala configuración; ambos métodos devuelven un disposer que elimina el registro. `registerFallback(handler)` registra el único handler para las solicitudes que no coinciden con ninguna ruta con nombre. Un segundo registro lanza una excepción; el servidor de dist de SPA [`dsh-host-frontend-static`](../frontend-static/README.es.md) es el propietario incluido, y el servidor devuelve 404 mientras no haya ninguno registrado. Las entradas de arranque del índice son filas estructuradas: `collectIndexInjections()` reúne una tabla `IndexInjection` nueva con un emit de `webserver/index-inject` por llamada, y `renderIndex(html)` renderiza las filas dentro de un body de index.html antes de aplicar las transformaciones crudas de `tapIndex(transform)` en orden de registro (`applyIndexTaps(html)`, la vía de escape para el markup que ninguna fila expresa); el handler de reserva llama a `renderIndex` en cada respuesta de índice, y un despliegue estático envía las mismas filas en su payload de arranque, renderizando con `renderIndexInjections` exportado. `port` lee el puerto de escucha (el valor asignado por el sistema operativo cuando `port` es 0), y `host` lee el host de bind configurado (hechos de tiempo de composición a los que se adaptan otros plugins, p. ej. el selector de directory-picker). El orden de coincidencia HTTP es fijo: exacto sobre toda la tabla, luego el prefijo más largo y luego el handler de reserva. Los upgrades coinciden exactamente y las conexiones sin coincidencia se cierran; el orden de registro no tiene semántica visible para las solicitudes.
+
+El paquete no conoce conceptos del harness y no sirve archivos: el puente HTTP `/api` y los WebSockets de bajada son rutas propiedad del plugin de conexión, los bundles de plugins y el flujo de eventos de HMR son rutas propiedad de los plugins de modules/hmr, y el servicio de dist pertenece al propietario de la reserva. El handler de upgrade es dueño del handshake del protocolo y del contenido de la conexión; el webserver solo entrega el socket y la solicitud crudos. `host` acepta solo `127.0.0.1` (postura por defecto) y `0.0.0.0` (exposición de red deliberada). Este servidor atiende solo a navegadores; Electron carga dist por `file://` y lleva el fetch por un puente IPC. Este paquete nunca imprime; la línea de URL pertenece al shell.
+
+Un fallo de escucha (EADDRINUSE…) lanza desde la activación y rechaza la composición del Loader con el diagnóstico de bind; el fiber candidato fallido se elimina. Una solicitud HTTP cuyo manejo lanza (un `decodeURIComponent` del propietario de la reserva sobre un %-escape malformado, un cliente que se desconecta a mitad del body) se responde con 400 — o se destruye el socket cuando las cabeceras ya salieron — y se registra como advertencia; nunca saca del proceso. Una excepción del handler de upgrade o un error de transporte del socket actualizado se registra como advertencia y destruye su socket. La disposición inicia `close()` y `closeAllConnections()`, destruye cada socket actualizado rastreado y solo regresa después de que el servidor HTTP y esos sockets se hayan cerrado.
+
+## Experiencia del modelo
+
+Ninguna, ya que el paquete es un transportista web entre el navegador y las rutas HTTP/upgrade que registran otros plugins; nada de esto llega a una solicitud de modelo.
+
+#### Efecto en la caché KV
+
+Ninguno; este paquete ni ensambla ni envía una solicitud de provider.
+
+## Limitaciones conocidas y trabajo diferido
+
+- **Sin TLS, autenticación ni política de origen** — vincular una dirección que no sea de loopback expone el servidor a esa red; el endurecimiento del despliegue (o ponerle delante un proxy inverso real) queda deliberadamente fuera del alcance de la v1 orientada al desarrollo.
+- **Las opciones de socket son fijas** — la config selecciona el host y el puerto de bind, mientras que el backlog y otros ajustes de socket siguen siendo internos hasta que un despliegue los necesite.

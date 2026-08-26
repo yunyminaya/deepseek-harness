@@ -1,0 +1,33 @@
+# Agent Note: Los bundles de plugins de profile sustituyen a las superposiciones fijas de las superficies
+
+Status: implemented
+
+[English](2026-08-05-profile-plugin-bundles.md) | Español
+
+## Problema
+
+El launcher `dsh` tenía sus composiciones codificadas a fuego: `base.cordis.yml` + `web.cordis.yml` se distribuían dentro de `apps/cli`, tres modos de entrada a medida (`--config`, `web`, `-p`) cada uno con su propia pila de capas, y una única superposición personal global (`$DSH_HOME/config.yaml`). No había forma de instalar un plugin fuera del árbol (un TUI, un paquete de providers) en una superficie distribuida sin editar el repositorio, ni un lugar donde un paquete de terceros pudiera aportar una composición por defecto.
+
+## Decisión
+
+Todo se convierte en un **profile**: un directorio `$DSH_HOME/profiles/<name>` con un `package.json` (dependencias de plugins fuera del árbol gestionadas con pnpm más el manifest del profile `dsh.profile` con su lista ordenada de capas `bundles`) y un `cordis.patch.yml` de usuario. Un **bundle** es un paquete npm que declara `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`; las dos clases de manifest viven bajo claves distintas `dsh.profile` / `dsh.bundle`, de modo que un package.json declara qué rol desempeña. El árbol compone sobre una raíz vacía aplicando el patch de cada bundle en el orden de `dsh.profile.bundles`, y después la capa de usuario y las superposiciones `--patch` — una única llamada a `applyEntryPatches` compartida por el boot y `--dump-config`. Los valores de invocación de la aplicación se trasladaron después de los patches derivados del launcher a los servicios de arranque en la [decisión de línea de comandos propiedad de la aplicación](2026-08-06-app-owned-command-line.es.md).
+
+Las plantillas de Profile por defecto usan `@deepseek-ai/dsh-base` (filas compartidas del core), `@deepseek-ai/dsh-web-app` (filas del Host del navegador y pegamento del runtime Web) y `@deepseek-ai/dsh-headless` (un runner directo de un solo disparo sobre base, sin web-app). El `dsh --profile <name>` genérico entrega sus argumentos restantes a la fila de arranque de línea de comandos de ese profile: Web es el dueño de su familia de banderas, mientras que headless es el dueño de su posicional de tarea. Las superposiciones de patch usan el `--patch` propiedad del launcher. `dsh plugin --profile <name> <args...>` es un reenviador pnpm ligero que inicializa el profile y reconcilia `dsh.profile.bundles` con las declaraciones de bundle instaladas; un paquete sin declaración de bundle sigue siendo una dependencia ordinaria. [Headless como punto de entrada directo del core](2026-08-09-headless-direct-core-entry-point.es.md) es el dueño del contrato de composición headless.
+
+La resolución está anclada en dos puntos por construcción: los nombres de `dsh.profile.bundles` se resuelven primero desde la instalación de dsh y después desde el directorio del profile — así los bundles integrados vienen siempre de la misma instalación que el `dsh` en ejecución y pnpm nunca los gestiona —, mientras que los nombres de plugin desnudos en las filas de patch se resuelven a través del recorrido de padres de Node del directorio del profile hacia el fallback plano mantenido `$DSH_HOME/profiles/node_modules` (un symlink por paquete del que dependen la app de la instalación y sus bundles, curado en cada lanzamiento).
+
+Dos refactorizaciones de apoyo: el servicio de dist estático integrado del webserver pasó a ser el **asiento fallback** de dueño único (`registerFallback`/`applyIndexTaps`), con el servidor SPA extraído a `@deepseek-ai/dsh-host-frontend-static` para que el bundle web sea el dueño de su dist como composición, y no el código del launcher; y la maquinaria de superposición personal de la [decisión de configuración personal del CLI dsh](../feature/2026-07-20-dsh-cli-personal-config.es.md) (`loadPersonalPatches`, `$DSH_HOME/config.yaml`) se reorientó hacia las capas `cordis.patch.yml` por-profile y de nivel home (`loadOptionalPatches`, `watchUserPatches` que toma un nombre de archivo), sucediendo a los modos de entrada y a la ubicación de archivo de esa nota y conservando su raíz de Harness-home, su semántica de patch y su análisis que falla ruidosamente.
+
+## Alternativas consideradas
+
+- **Escaneo de dependencias más un `patchOrder` parcial** (el boceto original): escanear `dependencies` en busca de bundles y ordenar alfabéticamente los no listados tiene dos fuentes de verdad y un desempate implícito; una lista explícita y ordenada `dsh.profile.bundles` es más pequeña y totalmente determinista. Un `pnpm add` crudo dentro del profile instala una librería sin activar ningún patch — explícito, sin escaneo mágico.
+- **Entradas `link:` para los bundles integrados**: pnpm no puede versionar, instalar ni actualizar un `link:` dentro de la instalación, incrusta una ruta de máquina en un archivo de usuario y se rompe cuando la instalación se mueve. La resolución de dos anclas más el fallback de symlink curado da la misma garantía («los bundles vienen de la instalación») sin ceremonia.
+- **Un módulo `context` pre-boot en el manifest del bundle** para valores de tiempo de arranque (ruta de dist, hechos de banderas): rechazada en favor de plugins puros — el pegamento son filas ordinarias y servicios de arranque propiedad de la aplicación, así que la composición sigue siendo totalmente volcable y el manifest sigue siendo solo datos. Los slots de host aportados por el launcher (`ctx.cmdlineArgs`, `ctx.appExit` y la instantánea del entorno) se aportan en el hook `prepare` de `boot()`, antes de que monte cualquier entrada del árbol de configuración.
+- **Autoaplicación transitiva de bundles**: solo las entradas directas de `dsh.profile.bundles` aportan capas; un meta-bundle que quiera reexportar el patch de otro bundle debe hacerlo explícitamente en su propio archivo de patch.
+
+## Consecuencias
+
+- Las nuevas superficies de composición (un TUI, paquetes de providers) se distribuyen como paquetes npm ordinarios instalables por profile; el repositorio ya no necesita una fila por cada forma de despliegue.
+- `apps/cli` se redujo al análisis de argv, al consumo de la maquinaria de profiles y al reenviador pnpm; `AppCLIEntry` y los caminos de boot por superficie han desaparecido.
+- El scaffold e2e web sin clave arranca las mismas capas de bundles sobre la misma forma de raíz vacía que producción, incluido el fallback del módulo de profiles, así que la deriva de composición entre test y producto falla ruidosamente.
+- Los backends no rechazan nada antiguo en disco (postura de prepublicación): `$DSH_HOME/config.yaml` simplemente ya no se lee.
